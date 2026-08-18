@@ -5,73 +5,65 @@ app = Flask(__name__)
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
+EXPECTED_PERMISSIONS = {
+    "contents": "read",
+    "packages": "write",
+    "id-token": "none",
+}
+
 
 @app.post("/release-gate")
 def release_gate():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     violations = []
 
-    workflow = data.get("workflow", {})
-    image = data.get("image", {})
+    workflow = data.get("workflow", {}) or {}
+    image = data.get("image", {}) or {}
 
     # ---------------------------------------------------------
     # 1. Permissions must be EXACTLY:
-    # contents: read
-    # packages: write
-    # id-token: none
+    #    contents: read, packages: write, id-token: none
+    #    (no extra scopes allowed)
     # ---------------------------------------------------------
-    permissions = workflow.get("permissions", {})
-
-    expected_permissions = {
-        "contents": "read",
-        "packages": "write",
-        "id-token": "none",
-    }
-
-    if permissions != expected_permissions:
+    permissions = workflow.get("permissions", {}) or {}
+    if permissions != EXPECTED_PERMISSIONS:
         violations.append("EXCESS_PERMISSION")
 
     # ---------------------------------------------------------
-    # 2. Pull requests must use pull_request, not
-    # pull_request_target.
-    #
-    # Tests must pass, matrix must be complete, and
-    # failFast must be false.
+    # 2. pull_request_target must NEVER be used, regardless of
+    #    what the top-level "event" field says. This is checked
+    #    unconditionally because pull_request_target is the
+    #    actual security hazard (it exposes secrets to forked-PR
+    #    code) -- gating this check behind event=="pull_request"
+    #    would let a mislabeled event slip through.
     # ---------------------------------------------------------
-    if data.get("event") == "pull_request":
-        if workflow.get("trigger") != "pull_request":
-            violations.append("UNSAFE_PR_TRIGGER")
+    if workflow.get("trigger") == "pull_request_target":
+        violations.append("UNSAFE_PR_TRIGGER")
 
-    if workflow.get("testsPassed") is not True:
+    # Tests must pass, matrix must be complete, failFast must be false.
+    tests_ok = (
+        workflow.get("testsPassed") is True
+        and workflow.get("matrixComplete") is True
+        and workflow.get("failFast") is False
+    )
+    if not tests_ok:
         violations.append("TESTS_INCOMPLETE")
 
-    if workflow.get("matrixComplete") is not True:
-        violations.append("TESTS_INCOMPLETE")
-
-    if workflow.get("failFast") is not False:
-        violations.append("TESTS_INCOMPLETE")
-
-    # Avoid returning TESTS_INCOMPLETE three times.
-    # The assignment asks for applicable violation codes,
-    # not duplicate copies of the same code.
-    violations = list(dict.fromkeys(violations))
-
     # ---------------------------------------------------------
-    # 3. Check GitHub Actions references.
-    #
-    # actions/* may use a version tag.
-    # Everything else must use a 40-character lowercase SHA.
+    # 3. Action pinning.
+    #    actions/* may use a version tag (e.g. v4).
+    #    Every other owner must pin to a full 40-char lowercase
+    #    hex commit SHA.
     # ---------------------------------------------------------
-    for action in workflow.get("actions", []):
+    for action in workflow.get("actions", []) or []:
         owner = action.get("owner")
-        ref = action.get("ref", "")
-
+        ref = action.get("ref", "") or ""
         if owner != "actions" and not FULL_SHA.fullmatch(ref):
             violations.append("MUTABLE_ACTION")
             break
 
     # ---------------------------------------------------------
-    # 4. Docker image checks
+    # 4. Docker image hardening
     # ---------------------------------------------------------
     if image.get("multiStage") is not True:
         violations.append("SINGLE_STAGE_IMAGE")
@@ -89,24 +81,14 @@ def release_gate():
         violations.append("UNPINNED_IMAGE")
 
     # ---------------------------------------------------------
-    # 5. Production requirements
-    #
-    # Production must be:
-    # push -> refs/heads/main
-    # and have environmentApproval == true
+    # 5. Production-only extra requirements
     # ---------------------------------------------------------
     if data.get("target") == "production":
-        if (
-            data.get("event") != "push"
-            or data.get("ref") != "refs/heads/main"
-        ):
+        if data.get("event") != "push" or data.get("ref") != "refs/heads/main":
             violations.append("INVALID_PRODUCTION_REF")
 
         if workflow.get("environmentApproval") is not True:
             violations.append("APPROVAL_REQUIRED")
-
-    # Remove duplicates while preserving order.
-    violations = list(dict.fromkeys(violations))
 
     decision = "promote" if not violations else "block"
 
@@ -114,6 +96,12 @@ def release_gate():
         "decision": decision,
         "violations": violations
     })
+
+
+@app.get("/")
+def health():
+    # simple health check so you can confirm the tunnel/host is alive
+    return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":
