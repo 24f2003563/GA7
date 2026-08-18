@@ -2,26 +2,27 @@ name: TDS GA7 Release Gate
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
   test:
     runs-on: ubuntu-latest
+
     steps:
       - name: TDS identity: 24f2003563@ds.study.iitm.ac.in
-        run: echo "identity step"
+        run: echo "TDS identity: 24f2003563@ds.study.iitm.ac.in"
 
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: npm install
+        run: pip install -r requirements.txt
 
-      - name: Start server
-        run: npm start &
-
-      - name: Run tests against /release-gate
-        run: |
-          sleep 3
-          curl -X POST http://localhost:3000/release-gate \
-            -H "Content-Type: application/json" \
-            -d '{"target":"preview", ... }'
+      - name: Run release gate tests
+        run: pytest
